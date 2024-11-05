@@ -4,6 +4,7 @@ import os
 from functools import partial
 import tiktoken
 from .schema import TooLongPromptError, LLMError
+import helm
 
 enc = tiktoken.get_encoding("cl100k_base")
 
@@ -31,8 +32,9 @@ except Exception as e:
 try:
     import openai
     # setup OpenAI API key
-    openai.organization, openai.api_key  =  open("openai_api_key.txt").read().strip().split(":")    
+    openai.base_url, openai.api_key  =  open("openai_api_key.txt").read().strip().split(",")    
     os.environ["OPENAI_API_KEY"] = openai.api_key 
+    os.environ["OPENAI_BASE_URL"] = openai.base_url
 except Exception as e:
     print(e)
     print("Could not load OpenAI API key openai_api_key.txt.")
