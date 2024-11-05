@@ -7,6 +7,7 @@ import re
 import glob
 import copy
 from argparse import Namespace
+import time
 import anthropic
 import MLAgentBench.high_level_actions as high_level_actions
 from MLAgentBench.schema import Action, EnhancedJSONEncoder
@@ -36,7 +37,11 @@ format_prompt_dict = {
 class Agent:
     """ Base class for agents. """
 
-    def __init__(self, args, env):        
+    def __init__(self, args, env):
+        self.start_time = time.time()
+        self.max_steps = args.max_steps
+        self.max_time = args.max_time
+
         self.args = args
         self.valid_format_entires = ["Action", "Action Input"]
         self.log_dir = os.path.join(args.log_dir, "agent_log")
@@ -173,8 +178,8 @@ class Agent:
                 d = json.loads(s)
             except:
                 # try to sanitize the string
-                s = cls.sanitize_json_string(s)
-                d = json.loads(s)
+                s_ = cls.sanitize_json_string(s)
+                d = json.loads(s_)
             if set(d.keys()) != set(action_info.usage.keys()):
                 raise Exception("Argument mismatch")
             return d
@@ -240,7 +245,6 @@ class SimpleActionAgent(Agent):
             f.write(self.initial_prompt + "\n")
 
         while not env.is_final() and len(self.history_steps) < self.args.agent_max_steps:
-
             curr_step = len(self.history_steps)
 
             #### call LLM for next action ###

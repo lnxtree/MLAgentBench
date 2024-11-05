@@ -2,9 +2,9 @@
 
 import os
 from functools import partial
+import tenacity
 import tiktoken
 from .schema import TooLongPromptError, LLMError
-import helm
 
 enc = tiktoken.get_encoding("cl100k_base")
 
@@ -241,7 +241,18 @@ def complete_text_crfm(prompt="", stop_sequences = [], model="openai/gpt-4-0314"
         log_to_file(log_file, prompt if not messages else str(messages), completion, model, max_tokens_to_sample)
     return completion
 
-
+@tenacity.retry(
+    wait=tenacity.wait_exponential(
+        multiplier=1, min=2, max=60
+    ),  # Exponential backoff starting at 2 seconds, max 60 seconds
+    stop=tenacity.stop_after_attempt(10),  # Stop after 10 attempts
+    retry=tenacity.retry_if_exception_type(
+        (
+            # https://github.com/openai/openai-python/blob/v0.28.0/openai/error.py
+            openai.error.OpenAIError,
+        )
+    ),
+)
 def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_tokens_to_sample=500, temperature=0.2, log_file=None, **kwargs):
     """ Call the OpenAI API to complete a prompt."""
     raw_request = {
@@ -265,20 +276,23 @@ def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_t
 def complete_text(prompt, log_file, model, **kwargs):
     """ Complete text using the specified model with appropriate API. """
     
-    if model.startswith("claude"):
-        # use anthropic API
-        completion = complete_text_claude(prompt, stop_sequences=[anthropic.HUMAN_PROMPT, "Observation:"], log_file=log_file, model=model, **kwargs)
-    elif model.startswith("gemini"):
-        completion = complete_text_gemini(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
-    elif model.startswith("huggingface"):
-        completion = complete_text_hf(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
-    elif "/" in model:
-        # use CRFM API since this specifies organization like "openai/..."
-        completion = complete_text_crfm(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
-    else:
-        # use OpenAI API
-        completion = complete_text_openai(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
-    return completion
+    try:
+        if model.startswith("claude"):
+            # use anthropic API
+            completion = complete_text_claude(prompt, stop_sequences=[anthropic.HUMAN_PROMPT, "Observation:"], log_file=log_file, model=model, **kwargs)
+        elif model.startswith("gemini"):
+            completion = complete_text_gemini(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
+        elif model.startswith("huggingface"):
+            completion = complete_text_hf(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
+        elif "/" in model:
+            # use CRFM API since this specifies organization like "openai/..."
+            completion = complete_text_crfm(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
+        else:
+            # use OpenAI API
+            completion = complete_text_openai(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
+        return completion
+    except tenacity.RetryError as e:
+        return str(e)  # If we failed even after retrying, just return the error message and the agent will see its failed attempt
 
 # specify fast models for summarization etc
 FAST_MODEL = "claude-v1"

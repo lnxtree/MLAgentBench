@@ -1,10 +1,16 @@
 """ This file contains the agent class for our AI research agent."""
 import os
 import sys
+import time
+
 import anthropic
+
 from MLAgentBench.LLM import complete_text_fast, complete_text
 from MLAgentBench.schema import Action
 from .agent import Agent
+
+
+TEMPERATURE = 1 # High temp for generation
 
 initial_prompt = """You are a helpful research assistant. You have access to the following tools:
 {tools_prompt}
@@ -22,15 +28,19 @@ Follow these instructions and do not forget them:
 - Follow the plan and try to achieve the goal as straightforwardly as possible.
 - Highlight the supporting experiment results and reasoning before drawing any conclusions. 
 - Do not try installing any new packages or libraries.
-- If you believe you have solved the problem, you can use the Final Answer action to submit your answer. You can only submit once, so double check that you have achieved the goal before submitting.
+
+Important: you have a total time limit of {time_limit} and a step limit of {step_limit}. You will be informed of the remaining time and steps at the end of each observation.
 
 Always respond in this format exactly:
 {format_prompt}
-Observation: 
+
+Next, you will be shown an observation of the following form:
 ```
 the result of the action
-```
 
+<TIME_REMAINING: (time_remaining)>
+<STEPS_REMAINING: (steps_remaining)>
+```
 """
 
 
@@ -43,6 +53,8 @@ format_prompt_dict = {
     "Action Input": "the input to the action as a valid JSON string",
 }
 
+def format_time(time_in_sec: int):
+    return f"{time_in_sec // 3600}hrs {(time_in_sec % 3600) // 60}mins {time_in_sec % 60}secs"
 
 class ResearchAgent(Agent):
     """This class implements AI research agent with different configurations."""
@@ -52,7 +64,14 @@ class ResearchAgent(Agent):
         self.valid_format_entires = ["Reflection",  "Research Plan and Status","Fact Check", "Thought","Action", "Action Input"] # use all entries by default
         if args.valid_format_entires:
             self.valid_format_entires = args.valid_format_entires
-        self.initial_prompt = initial_prompt.format(tools_prompt=self.tools_prompt, tool_names=self.prompt_tool_names,  task_description=env.research_problem, format_prompt="\n".join([f"{k}: {format_prompt_dict[k]}" for k in self.valid_format_entires]))
+        self.initial_prompt = initial_prompt.format(
+            tools_prompt=self.tools_prompt,
+            tool_names=self.prompt_tool_names,
+            task_description=env.research_problem,
+            time_limit=format_time(self.args.max_time),
+            step_limit=self.args.max_steps,
+            format_prompt="\n".join([f"{k}: {format_prompt_dict[k]}" for k in self.valid_format_entires]),
+        )
 
     def run(self, env):
         last_steps = self.args.max_steps_in_context
@@ -64,6 +83,8 @@ class ResearchAgent(Agent):
         while not env.is_final() and len(self.history_steps) < self.args.agent_max_steps:
 
             curr_step = len(self.history_steps)
+            print("\n----------\n")
+            print("Step", curr_step)
 
             #### call LLM for next action ###
 
@@ -110,20 +131,23 @@ class ResearchAgent(Agent):
             valid_response = False
             for _ in range(self.args.max_retries):
                 log_file = os.path.join(self.log_dir , f"step_{curr_step}_log.log")
-                completion = complete_text(prompt, log_file, self.args.llm_name)
+                model_kwargs = {
+                    "max_tokens": self.args.max_tokens,
+                    "max_tokens_to_sample": self.args.max_tokens,
+                    "temperature": TEMPERATURE,
+                }
+                completion = complete_text(prompt, log_file, self.args.llm_name, **model_kwargs)
 
                 try:
                     entries = self.parse_entries(completion, self.valid_format_entires)
                     assert entries["Action"].strip() in self.all_tool_names
                     valid_response = True
                 except:
-                    print("Step", curr_step, file=sys.stderr)
-                    print(anthropic.AI_PROMPT + "\n" + completion + "\nObservation:\n", file=sys.stderr)
-                    print("Response is invalid and discarded", file=sys.stderr)
                     prompt += "\n\n Your response was in incorrect format. Please provide a valid response with all entries: " + ", ".join(self.valid_format_entires) + "\n\n"
                 else:
                     break
             if not valid_response:
+                print("Response is invalid and discarded", file=sys.stderr)
                 return "No valid response after max_retries"
 
             ########################################################
@@ -152,6 +176,8 @@ class ResearchAgent(Agent):
                 f.write("Step " + str(curr_step) + ":\n")
                 f.write(anthropic.AI_PROMPT + "\n" + self.print_action(entries, self.valid_format_entires) + "\nObservation:\n")
 
+            print("Action", action)
+            print("Action Input", action_input)
 
             ########################################
             #         execute action in env        #
@@ -180,6 +206,16 @@ class ResearchAgent(Agent):
 
                 print("Observation is too long. Summarizing...", file=sys.stderr)
                 observation = self.summarize_observation(self.print_action(entries, self.valid_format_entires), observation, log_file)
+
+            # Append time info to observation
+            time_elapsed = time.time() - self.start_time
+            time_remaining = int(self.max_time - time_elapsed)
+            steps_taken = len(self.history_steps) + 1
+            steps_remaining = self.max_steps - steps_taken
+            observation += (
+                f"\n\n<TIME_REMAINING: {format_time(time_remaining)}>\n"
+                f"<STEPS_REMAINING: {steps_remaining}>\n"
+            )
 
             self.history_steps.append({"step_idx": len(env.trace.steps), "action": entries, "observation": observation})
 
@@ -220,13 +256,15 @@ class ResearchAgent(Agent):
 
     ################### Helper functions #####################
 
-    def summarize_observation(self, action, observation, log_file, bs = 10000):
+    def summarize_observation(self, action, observation, log_file, bs = 10000, max_chunks=100):
         """ Summarize the observation if it is too long with a sliding window of size bs """
 
-        bs = 10000
         blocks = [observation[i:i+bs] for i in range(0, len(observation), bs)]
         descriptions = []
         for idx, b in enumerate(blocks):
+            if idx >= max_chunks:
+                descriptions.append(f"WARNING: Reached maximum number of chunks ({max_chunks}), this summary of the observation will be incomplete. Please consider trimming down your action request to avoid overloading the observation response.")
+                break
             start_line_number = bs*idx+1
             end_line_number = bs*idx+1 + len(b)
             prompt = f"""
@@ -247,7 +285,7 @@ Do not include any result that is guessed rather than directly confirmed by the 
         if len(descriptions) == 1:
             completion = descriptions[0]
         else:
-            descriptions = "\n\n".join(["Segment {idx}: \n\n" + s for s in descriptions])
+            descriptions = "\n\n".join([f"Segment {idx}: \n\n" + s for s in descriptions])
             prompt = f"""
 {action}
 

@@ -1,6 +1,7 @@
 """ This file contains the low level actions that are provided by the environment, mostly file system operations and code execution. """
 
 import os
+from pathlib import Path
 import subprocess
 import selectors
 import shutil
@@ -70,6 +71,7 @@ def check_file_read_only(arg_names, **kwargs):
 
 def check_file_in_work_dir(arg_names, **kwargs):
     """ This decorator checks if the file is in the work directory. """
+    print("running check_file_in_work_dir")
     def inner(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -87,11 +89,14 @@ def check_file_in_work_dir(arg_names, **kwargs):
 @check_file_in_work_dir(["dir_path"])
 @record_low_level_step
 def list_files( dir_path, work_dir = ".", **kwargs):
+    max_chars = 10000
     try:
-        observation = subprocess.check_output(["ls", "-F", os.path.join(work_dir,dir_path)]).decode("utf-8")
+        observation = subprocess.check_output(["ls", os.path.join(work_dir,dir_path)]).decode("utf-8")
+        if len(observation) > max_chars:
+            observation = observation[:max_chars] + "...[TRUNCATED]"
         return observation
-    except:
-        raise EnvException(f"Cannot list file in the {dir_path} directory")
+    except Exception as e:
+        raise EnvException(f"Cannot list file in the {dir_path} directory: {str(e)}")
 
     
 
@@ -103,8 +108,8 @@ def read_file(file_name, work_dir = '.', **kwargs):
     try:
         observation = open(os.path.join(work_dir,file_name)).read()
         return observation
-    except:
-        raise EnvException(f"cannot read file {file_name}")
+    except Exception as e:
+        raise EnvException(f"cannot read file {file_name}: {str(e)}")
 
 
 @check_file_in_work_dir(["file_name"])
@@ -116,8 +121,8 @@ def write_file(file_name, content, work_dir = ".", **kwargs):
             f.write(content)
         observation = f"File {file_name} written successfully."
         return observation
-    except:
-        raise EnvException(f"cannot write file {file_name}")
+    except Exception as e:
+        raise EnvException(f"cannot write file {file_name}: {str(e)}")
 
 
 @check_file_in_work_dir(["file_name"])
@@ -129,8 +134,8 @@ def append_file(file_name, content, work_dir = ".", **kwargs):
             f.write(content)
         observation = f"File {file_name} appended successfully."
         return observation
-    except:
-        raise EnvException(f"cannot append file {file_name}")
+    except Exception as e:
+        raise EnvException(f"cannot append file {file_name}: {str(e)}")
 
 
 @check_file_in_work_dir(["source", "destination"])
@@ -142,8 +147,8 @@ def copy_file( source, destination, work_dir = ".", **kwargs):
         shutil.copyfile(os.path.join(work_dir,source), os.path.join(work_dir,destination))
         observation = f"File {source} copied to {destination}"
         return observation
-    except:
-        raise EnvException(f"File {source} copy to {destination} failed. Check whether the source and destinations are valid.")
+    except Exception as e:
+        raise EnvException(f"File {source} copy to {destination} failed. Check whether the source and destinations are valid: {str(e)}")
 
 
 @check_file_in_work_dir(["script_name"])
@@ -163,9 +168,8 @@ def undo_edit_script( script_name, work_dir = ".", **kwargs):
         new_content = open(os.path.join(work_dir,script_name)).read()
         observation = f"Content of {script_name} after undo the most recent edit:\n" + new_content
         return observation
-    except:
-        raise EnvException(f"Cannot undo the edit of file name {script_name}. Check the file name again."
-        )
+    except Exception as e:
+        raise EnvException(f"Cannot undo the edit of file name {script_name}. Check the file name again: {str(e)}")
 
 
 @check_file_in_work_dir(["script_name"])
@@ -249,6 +253,17 @@ def python_repl(command, work_dir = ".", **kwargs):
 @record_low_level_step
 def request_help(request, work_dir = ".", **kwargs):
     return input(f"Research Assistant is requesting help: {request}\n")
+
+
+@check_file_in_work_dir(["submission_path"])
+@record_low_level_step
+def validate_submission(submission_path, work_dir = ".", **kwargs):
+    submission_path = submission_path.strip()
+    try:
+        observation = subprocess.check_output(["bash", "/home/validate_submission.sh", submission_path], cwd=work_dir).decode("utf-8")
+        return observation
+    except Exception as e:
+        raise EnvException(f"Failed to validate submission file {submission_path}: {str(e)}")
 
 
 ### describe the low level actions
@@ -347,10 +362,20 @@ LOW_LEVEL_ACTIONS = [
         is_primitive=True
     ),
     ActionInfo(
-        name="Final Answer",
-        description="Use this to provide the final answer to the current task.",
+        name="Validate Submission",
+        description="Use the benchmark-provided tool to validate the format of your submission. You must provide the path to a submission file.",
         usage={
-            "final_answer": "a detailed description on the final answer"
+            "submission_path": "path to the file you wish to validate, e.g. submission/submission.csv (path should be relative to your current working directory)",
+        },
+        return_value="The observation is a message informing you whether your submission file is in a format compatible for grading or not.",
+        function=validate_submission,
+        is_primitive=True,
+    ),
+    ActionInfo(
+        name="Final Answer",
+        description="Use this to end your session. IMPORTANT: You will not be able to perform any other actions after this one. Use this only when you are sure that you have exhausted all avenues for improving your solution to the task.",
+        usage={
+            "final_answer": "summary of what you have accomplished and the final state of the task"
         },
         return_value="The observation will be empty.",
         function=(lambda **kwargs: ""),
